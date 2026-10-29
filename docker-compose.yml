@@ -1,0 +1,132 @@
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL database
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: bakery-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-bakery}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
+      POSTGRES_DB: ${POSTGRES_DB:-bakerydb}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bakery} -d ${POSTGRES_DB:-bakerydb}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    command:
+      - "postgres"
+      - "-c"
+      - "max_wal_size=1GB"
+      - "-c"
+      - "min_wal_size=128MB"
+      - "-c"
+      - "log_min_duration_statement=1000"
+    networks:
+      - bakery-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Go backend  — source lives in the sibling repo: bakery-golang
+  #   Build from source (dev):   docker compose up --build backend
+  #   Pull prebuilt image (CI):  set BACKEND_IMAGE to a registry tag and
+  #                              run `docker compose pull backend`
+  # ---------------------------------------------------------------------------
+  backend:
+    image: ${BACKEND_IMAGE:-bakery-golang:local}
+    build:
+      context: ${BACKEND_CONTEXT:-../bakery-golang}
+      target: ${BACKEND_TARGET:-dev}
+    container_name: bakery-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-bakery}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/${POSTGRES_DB:-bakerydb}?sslmode=disable
+      APP_PORT: "8080"
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      # Bind-mount source for hot reload in dev. Comment out for prod image runs.
+      - ${BACKEND_CONTEXT:-../bakery-golang}:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - bakery-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Angular frontend  — source lives in the sibling repo: bakery-angular
+  # ---------------------------------------------------------------------------
+  frontend:
+    image: ${FRONTEND_IMAGE:-bakery-angular:local}
+    build:
+      context: ${FRONTEND_CONTEXT:-../bakery-angular}
+      target: ${FRONTEND_TARGET:-prod}
+    container_name: bakery-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-4200}:80"
+    depends_on:
+      - backend
+    networks:
+      - bakery-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # Kafka (future use) — only starts with: docker compose --profile kafka up
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: bitnami/kafka:3.7
+    container_name: bakery-kafka
+    restart: unless-stopped
+    profiles: ["kafka"]
+    environment:
+      KAFKA_CFG_NODE_ID: "1"
+      KAFKA_CFG_PROCESS_ROLES: "controller,broker"
+      KAFKA_CFG_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_CFG_LISTENERS: "PLAINTEXT://:9092,CONTROLLER://:9093"
+      KAFKA_CFG_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+      KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+      KAFKA_CFG_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_CFG_LOG_RETENTION_HOURS: "168"
+      KAFKA_CFG_LOG_RETENTION_BYTES: "1073741824"
+    ports:
+      - "${KAFKA_PORT:-9092}:9092"
+    volumes:
+      - kafka_data:/bitnami/kafka
+    networks:
+      - bakery-net
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  bakery-net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
+  kafka_data:
+    driver: local
